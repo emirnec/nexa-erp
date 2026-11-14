@@ -1,5 +1,7 @@
 # NEXA ERP
 
+[![Build and test](https://github.com/emirnec/nexa-erp/actions/workflows/ci.yml/badge.svg)](https://github.com/emirnec/nexa-erp/actions/workflows/ci.yml)
+
 **Multi-tenant ERP for motorcycle dealerships** — inventory, sales, branch stock, accounting, customer history and a public product catalogue in one application.
 
 Built with **.NET 10**, **React 19 / TypeScript** and **PostgreSQL 18**. The interface is Turkish; the domain model is designed for dealerships with multiple branches and independent tenant businesses.
