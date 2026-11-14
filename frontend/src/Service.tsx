@@ -109,7 +109,7 @@ export function PartsPage({ role }: { role: Role }) {
             <Field label="Açılış stoğu"><input type="number" min="0" step="1" value={form.stockQuantity} onChange={(e) => setForm({ ...form, stockQuantity: e.target.value })} /></Field>
             <Field label="Alış maliyeti (TL)"><input type="number" min="0" step="0.01" value={form.purchaseCost} onChange={(e) => setForm({ ...form, purchaseCost: e.target.value })} /></Field>
             <Field label="Satış fiyatı (TL)"><input type="number" min="0" step="0.01" value={form.salePrice} onChange={(e) => setForm({ ...form, salePrice: e.target.value })} /></Field>
-            <div className="form-actions"><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Kaydediliyor…" : "Parçayı Kaydet"}</button></div>
+            <div className="form-actions span-all"><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Kaydediliyor…" : "Parçayı Kaydet"}</button></div>
           </form>
         </section>
       )}
@@ -160,6 +160,11 @@ export function ServicePage({ role }: { role: Role }) {
   const openCount = orders.filter((o) => o.status === "Open").length;
   const activeCount = orders.filter((o) => o.status === "InProgress" || o.status === "Ready").length;
   const invoicedTotal = orders.filter((o) => o.status === "Invoiced").reduce((t, o) => t + o.total, 0);
+  const draftLines = items.filter((i) => i.description.trim());
+  const draftLaborTotal = draftLines.filter((i) => i.kind === "Labor").reduce((t, i) => t + (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0), 0);
+  const draftPartsTotal = draftLines.filter((i) => i.kind === "Part").reduce((t, i) => t + (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0), 0);
+  const selectedCustomer = customers.find((c) => String(c.id) === form.customerId);
+  const selectedMotorcycle = motorcycles.find((m) => String(m.id) === form.motorcycleId);
 
   function updateItem(key: number, patch: Partial<DraftItem>) {
     setItems((rows) => rows.map((row) => row.key === key ? { ...row, ...patch } : row));
@@ -244,9 +249,10 @@ export function ServicePage({ role }: { role: Role }) {
         <StatCard icon="package" tone="violet" label="Parça kalemi" value={orders.reduce((t, o) => t + o.items.filter((i) => i.kind === "Part").length, 0)} />
       </div>
 
-      <section className="panel">
-        <PanelHead title="Yeni Servis İş Emri" description="Müşteri ve aracı seç, işçilik/parça kalemlerini ekle. Parça stoğu fatura kesildiğinde düşülür." />
-        <form className="form-grid cols-2" onSubmit={(e) => void create(e)}>
+      <div className="split stack">
+        <section className="panel">
+          <PanelHead title="Yeni Servis İş Emri" description="Müşteri ve aracı seç, işçilik/parça kalemlerini ekle. Parça stoğu fatura kesildiğinde düşülür." />
+          <form id="service-order-form" className="form-grid cols-2" onSubmit={(e) => void create(e)}>
           <Field label="Müşteri"><Select value={form.customerId} onChange={(value) => setForm({ ...form, customerId: value })}
             options={[{ value: "", label: "Müşteri seç (opsiyonel)" }, ...customers.map((c) => ({ value: String(c.id), label: c.fullName, meta: c.phone ?? "" }))]} searchable /></Field>
           <Field label="Motosiklet"><Select value={form.motorcycleId} onChange={(value) => setForm({ ...form, motorcycleId: value })}
@@ -256,35 +262,56 @@ export function ServicePage({ role }: { role: Role }) {
           <Field label="Teslim / vade"><input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} /></Field>
           <Field label="Not"><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
           <div className="span-all">
-            <div className="extra-row-head" aria-hidden="true"><span>Açıklama</span><span>Tür</span><span>Adet × Fiyat × Maliyet</span><span /></div>
-            {items.map((item) => (
-              <div className="extra-row" key={item.key}>
-                <input value={item.description} onChange={(e) => updateItem(item.key, { description: e.target.value })} placeholder="İşçilik veya parça" aria-label="Kalem açıklaması" />
-                <select value={item.kind} onChange={(e) => updateItem(item.key, { kind: e.target.value, partId: "" })} aria-label="Kalem türü">
-                  <option value="Labor">İşçilik</option><option value="Part">Parça</option>
-                </select>
-                <div className="inline-fields has-cost">
+            <div className="service-lines">
+              <div className="service-line-head" aria-hidden="true">
+                <span>Açıklama</span><span>Tür</span><span>Adet</span><span>Fiyat</span><span>Maliyet</span><span />
+              </div>
+              {items.map((item) => (
+                <div className="service-line" key={item.key}>
+                  <div className="service-line-main">
+                    <input value={item.description} onChange={(e) => updateItem(item.key, { description: e.target.value })} placeholder="İşçilik veya parça" aria-label="Kalem açıklaması" />
+                    {item.kind === "Part" && (
+                      <Select value={item.partId} onChange={(value) => pickPart(item.key, value)}
+                        options={[{ value: "", label: "Stoktan parça seç" }, ...parts.filter((p) => p.stockQuantity > 0).map((p) => ({ value: String(p.id), label: `${p.code} · ${p.name}`, meta: `Stok: ${p.stockQuantity}` }))]} searchable />
+                    )}
+                  </div>
+                  <select value={item.kind} onChange={(e) => updateItem(item.key, { kind: e.target.value, partId: "" })} aria-label="Kalem türü">
+                    <option value="Labor">İşçilik</option><option value="Part">Parça</option>
+                  </select>
                   <input type="number" min="1" step="1" value={item.quantity} onChange={(e) => updateItem(item.key, { quantity: e.target.value })} aria-label="Adet" />
                   <input type="number" min="0" step="0.01" value={item.unitPrice} onChange={(e) => updateItem(item.key, { unitPrice: e.target.value })} placeholder="Fiyat" aria-label="Birim fiyat" />
                   <input type="number" min="0" step="0.01" value={item.unitCost} onChange={(e) => updateItem(item.key, { unitCost: e.target.value })} placeholder="Maliyet" aria-label="Birim maliyet" />
+                  <button type="button" className="icon-btn danger" aria-label="Satırı kaldır" onClick={() => setItems((rows) => rows.filter((r) => r.key !== item.key))}><Icon name="x" size={15} /></button>
                 </div>
-                <button type="button" className="icon-btn danger" aria-label="Satırı kaldır" onClick={() => setItems((rows) => rows.filter((r) => r.key !== item.key))}><Icon name="x" size={15} /></button>
-                {item.kind === "Part" && (
-                  <div className="span-all" style={{ width: "100%" }}>
-                    <Select value={item.partId} onChange={(value) => pickPart(item.key, value)}
-                      options={[{ value: "", label: "Stoktan parça seç (opsiyonel)" }, ...parts.filter((p) => p.stockQuantity > 0).map((p) => ({ value: String(p.id), label: `${p.code} · ${p.name}`, meta: `Stok: ${p.stockQuantity}` }))]} searchable />
-                  </div>
-                )}
+              ))}
+              <div className="extra-editor-actions">
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => setItems((rows) => [...rows, emptyItem(nextKey.current++)])}><Icon name="plus" size={15} /> Kalem ekle</button>
+                <span className="muted-text">Toplam: <strong>{money(draftLaborTotal + draftPartsTotal)}</strong></span>
               </div>
-            ))}
-            <div className="extra-editor-actions">
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setItems((rows) => [...rows, emptyItem(nextKey.current++)])}><Icon name="plus" size={15} /> Kalem ekle</button>
-              <span className="muted-text">Toplam: <strong>{money(items.reduce((t, i) => t + (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0), 0))}</strong></span>
             </div>
           </div>
-          <div className="form-actions span-all"><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Oluşturuluyor…" : "İş Emrini Aç"}</button></div>
         </form>
-      </section>
+        </section>
+
+        <section className="panel">
+          <PanelHead title="Servis Özeti" />
+          <div className="summary-box">
+            <div className="summary-row"><span>Müşteri</span><strong>{selectedCustomer?.fullName ?? "Seçilmedi"}</strong></div>
+            <div className="summary-row"><span>Araç</span><strong>{selectedMotorcycle ? `${selectedMotorcycle.brand} ${selectedMotorcycle.model}` : "Seçilmedi"}</strong></div>
+            <div className="summary-row"><span>Kalem</span><strong>{draftLines.length} satır</strong></div>
+            <div className="summary-row"><span>İşçilik</span><strong>{money(draftLaborTotal)}</strong></div>
+            <div className="summary-row"><span>Parça</span><strong>{money(draftPartsTotal)}</strong></div>
+            <div className="summary-total"><span>Toplam</span><strong>{money(draftLaborTotal + draftPartsTotal)}</strong></div>
+          </div>
+          <div className="callout callout-info" style={{ marginTop: 14 }}>
+            <Icon name="alert" />
+            <div>Parça stoğu iş emri açılırken değil, <strong>fatura kesilirken</strong> düşülür. Böylece iş emri düzenlenirken stok kilitlenmez.</div>
+          </div>
+          <button type="submit" form="service-order-form" className="btn btn-primary btn-block" style={{ marginTop: 16 }} disabled={saving}>
+            {saving ? "Oluşturuluyor…" : "İş Emrini Aç"}
+          </button>
+        </section>
+      </div>
 
       <section className="panel">
         <PanelHead title="Servis İş Emirleri" description={`${orders.length} kayıt`} />

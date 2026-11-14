@@ -259,6 +259,36 @@ tr.row-cancelled td:not(:last-child) { text-decoration: line-through; text-decor
 .extra-row-head { color: var(--text-faint); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
 .extra-row input, .extra-row select { width: 100%; }
 .extra-row .icon-btn { justify-self: end; }
+/* Servis kalem satırları: adet/fiyat/maliyet ayrı ve okunur alanlar. */
+.service-lines { display: grid; gap: 8px; }
+.service-line, .service-line-head { display: grid; grid-template-columns: minmax(0, 1fr) 92px 56px 86px 82px 34px; gap: 8px; align-items: center; }
+.service-line-head { color: var(--text-faint); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+.service-line input, .service-line select {
+  width: 100%; height: var(--control-h); padding: 0 var(--control-px);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); font-size: var(--control-fs); line-height: 1.2;
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.service-line select { cursor: pointer; }
+.service-line input:focus, .service-line select:focus {
+  border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+.service-line input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+.service-line input[type="number"]::-webkit-outer-spin-button,
+.service-line input[type="number"]::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.service-line .icon-btn { justify-self: end; }
+.service-line-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; }
+.service-line-main .select, .service-line-main input { width: 100%; }
+@media (max-width: 640px) {
+  .service-line-head { display: none; }
+  .service-line { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 34px; align-items: start; }
+  .service-line-main { grid-column: 1 / -1; }
+  .service-line > select { grid-column: 1 / 2; }
+  .service-line > input[aria-label="Adet"] { grid-column: 2 / 3; }
+  .service-line > input[aria-label="Birim fiyat"] { grid-column: 1 / 2; grid-row: 3; }
+  .service-line > input[aria-label="Birim maliyet"] { grid-column: 2 / 3; grid-row: 3; }
+  .service-line > .icon-btn { grid-column: 3 / 4; grid-row: 2; justify-self: end; }
+}
 .inline-fields { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 6px; }
 .inline-fields.has-cost { grid-template-columns: 52px minmax(0, 1fr) 72px; }
 .extra-editor-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
