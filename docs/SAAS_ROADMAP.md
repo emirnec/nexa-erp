@@ -44,6 +44,16 @@ The existing .NET 10 API, React/Vite frontend and PostgreSQL database remain the
 - Payments, expenses, accounting entries, balance and profitability reports.
 - Shared workflow records for calendar, service, parts, purchasing, trade-in, CRM, finance and automation.
 
+### CRM, service, finance and session milestone — implemented in source
+
+- PostgreSQL `xmin` optimistic concurrency on stock, sales, parts and service orders; transactional stock/accounting writes.
+- `Idempotency-Key` support for sales and payments with per-tenant storage.
+- Due dates and `SaleInstallments`; oldest-due-first payment allocation; receivables aging API and UI.
+- Customer credit limit enforced under a customer-row lock, shared by sales and invoiced service orders.
+- Dedicated parts catalogue, part stock ledger and service work orders (open → in progress → ready → invoiced/cancelled).
+- Service invoicing deducts part stock and posts labour/parts/cost accounting; cash, card and credit collections supported.
+- Token-version session revocation on logout, password change/reset and deactivation; login lockout after repeated failures.
+
 The shared workflow screens are a usable record/task foundation, not a substitute for dedicated production workflows. The following work remains before those modules can be called complete.
 
 ## Remaining module implementation
@@ -82,17 +92,17 @@ The shared workflow screens are a usable record/task foundation, not a substitut
 ### 5. Service and spare parts
 
 - Service appointment and check-in form.
-- Work orders, labor operations, technician assignment and status board.
-- Parts catalogue, compatible models, bin/location stock and reservations.
+- Technician assignment and a drag-and-drop status board.
+- Compatible-model mapping, bin/location stock and reservations.
 - Warranty claims, maintenance schedules and service history.
-- Customer approval, invoice and delivery handover.
+- Customer approval and delivery handover checklist.
 
 ### 6. Finance
 
-- Customer/supplier current accounts and installment schedules.
-- Cash/bank accounts, transfers, reconciliations and period closing.
+- Supplier current accounts and payables aging.
+- Cash/bank accounts transfers, reconciliations and period closing.
 - Tax/VAT handling, document numbering and export formats appropriate to local accounting rules.
-- Receivables aging, payables aging, cash-flow and branch profitability.
+- Cash-flow forecasting and branch profitability depth.
 
 ### 7. Automation and communication
 
@@ -105,7 +115,7 @@ The shared workflow screens are a usable record/task foundation, not a substitut
 ### 8. Security and operations
 
 - Password reset, forced password rotation, optional TOTP 2FA and recovery codes.
-- Session/device list, token version invalidation, login throttling and lockout.
+- Session/device list and per-device revocation (token-version invalidation and lockout are implemented).
 - Fine-grained role/permission matrix beyond Admin/Staff/Dealer.
 - Immutable audit history for sensitive changes.
 - Scheduled encrypted backups, restore drills, retention policy and monitoring.

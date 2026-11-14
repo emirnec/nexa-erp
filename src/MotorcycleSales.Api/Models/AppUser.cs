@@ -10,4 +10,10 @@ public class AppUser : ITenantEntity
     public int? DealerId { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public int TokenVersion { get; set; }
+    public int FailedLoginCount { get; set; }
+    public DateTime? LockoutUntil { get; set; }
+    public DateTime? LastLoginAt { get; set; }
+    public DateTime? LastPasswordChangedAt { get; set; }
+    public bool MustChangePassword { get; set; }
 }

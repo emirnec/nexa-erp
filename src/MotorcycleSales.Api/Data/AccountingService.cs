@@ -185,6 +185,23 @@ public class AccountingService(AppDbContext db)
         await PostAsync("Sale", sale.Id, $"Satış #{sale.Id} {sale.InvoiceNo}", sale.SaleDate, lines);
     }
 
+    public async Task PostServiceOrderAsync(ServiceOrder order, decimal cost)
+    {
+        if (order.Total <= 0) return;
+        var debit = order.PaymentMethod switch { "Cash" => "100", "Card" => "102", _ => "120" };
+        var lines = new List<(string, decimal, decimal, string?)>
+        {
+            (debit, order.Total, 0, "Servis tahsilatı"),
+            ("600", 0, order.Total, "Servis geliri"),
+        };
+        if (cost > 0)
+        {
+            lines.Add(("621", cost, 0, "Servis parça maliyeti"));
+            lines.Add(("153", 0, cost, "Parça stok çıkışı"));
+        }
+        await PostAsync("ServiceOrder", order.Id, $"Servis faturası {order.InvoiceNo}", order.InvoicedAt ?? DateTime.UtcNow, lines);
+    }
+
     public async Task PostPurchaseAsync(int movementId, decimal amount, string note) =>
         await PostAsync("Purchase", movementId, note, DateTime.UtcNow,
         [

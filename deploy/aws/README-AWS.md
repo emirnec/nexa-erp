@@ -214,9 +214,11 @@ sudo -u postgres psql -d nexa -v ON_ERROR_STOP=1 \
   -f /tmp/nexa-deploy/database/upgrade_v5_sale_payments.sql
 sudo -u postgres psql -d nexa -v ON_ERROR_STOP=1 \
   -f /tmp/nexa-deploy/database/upgrade_v6_extra_cost.sql
+sudo -u postgres psql -d nexa -v ON_ERROR_STOP=1 \
+  -f /tmp/nexa-deploy/database/upgrade_v7_crm_service.sql
 ```
 
-v5 adımı `Sales` tablosuna nakit/kart/taksit kolonlarını ekler, `SaleExtras` tablosunu oluşturur ve eski satışların ödeme alanlarını doldurur. v6 adımı `SaleExtras` tablosuna ek kalem maliyeti (`UnitCost`) ve satış tarih indeksini ekler. Veriler silinmez. Migration `postgres` kullanıcısıyla çalıştırılsa bile yeni tablonun sahipliğini otomatik olarak `Sales` tablosunun sahibine (uygulama kullanıcısı `nexa`) devreder.
+v7 adımı cari kredi limiti, satış taksitleri, yedek parça/stok hareketleri, servis iş emirleri ve oturum sürümü kolonlarını ekler. **API'yi güncellemeden önce v7'yi uygulayın**; aksi halde yeni uçlar `column/relation does not exist` hatası verir. v5 adımı `Sales` tablosuna nakit/kart/taksit kolonlarını ekler, `SaleExtras` tablosunu oluşturur ve eski satışların ödeme alanlarını doldurur. v6 adımı `SaleExtras` tablosuna ek kalem maliyeti (`UnitCost`) ve satış tarih indeksini ekler. Veriler silinmez. Migration `postgres` kullanıcısıyla çalıştırılsa bile yeni tablonun sahipliğini otomatik olarak `Sales` tablosunun sahibine (uygulama kullanıcısı `nexa`) devreder.
 
 > Daha eski bir paketteki migration'ı çalıştırdıysan ve API logunda `permission denied for table SaleExtras` görüyorsan şu iki komutu bir kez çalıştır:
 >

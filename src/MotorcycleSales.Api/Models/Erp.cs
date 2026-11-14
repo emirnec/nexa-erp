@@ -104,5 +104,7 @@ public class Payment : ITenantEntity
     public int? CustomerId { get; set; }
     public string? Counterparty { get; set; }
     public string? Note { get; set; }
+    public int? ServiceOrderId { get; set; }
+    public string? IdempotencyKey { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

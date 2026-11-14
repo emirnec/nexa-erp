@@ -212,6 +212,13 @@ public static class ErpEndpoints
         });
         app.MapPost("/api/payments", async (PaymentRequest request, HttpContext ctx, AppDbContext db, AccountingService acc) =>
         {
+            var idempotencyKey = ReadIdempotencyKey(ctx);
+            if (idempotencyKey is not null)
+            {
+                if (idempotencyKey.Length > 100) return Results.BadRequest("Idempotency-Key en fazla 100 karakter olabilir.");
+                var existing = await db.Payments.AsNoTracking().FirstOrDefaultAsync(p => p.IdempotencyKey == idempotencyKey);
+                if (existing is not null) return Results.Ok(existing);
+            }
             if (request.Amount <= 0 || request.Direction is not ("In" or "Out") || request.Method is not ("Cash" or "Bank" or "Card"))
                 return Results.BadRequest("Yön, yöntem ve tutarı kontrol edin.");
             // Bayi kullanıcısı yalnızca kendi şubesinin satışına tahsilat bağlayabilir.
@@ -221,12 +228,26 @@ public static class ErpEndpoints
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             await using var tx = await db.Database.BeginTransactionAsync();
             Sale? sale = null;
+            ServiceOrder? serviceOrder = null;
+            if (request.ServiceOrderId is int orderId)
+            {
+                serviceOrder = await db.ServiceOrders.FirstOrDefaultAsync(x => x.Id == orderId);
+                if (serviceOrder is null) return Results.NotFound("Servis iş emri bulunamadı.");
+                await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM \"ServiceOrders\" WHERE \"Id\" = {orderId} FOR UPDATE");
+                await db.Entry(serviceOrder).ReloadAsync();
+                if (serviceOrder.Status != "Invoiced") return Results.Conflict("Yalnızca faturalanmış servis iş emrine tahsilat eklenebilir.");
+                if (request.Direction != "In") return Results.BadRequest("Servis tahsilatı giriş yönünde olmalıdır.");
+                if (request.Amount > serviceOrder.Total - serviceOrder.PaidAmount + 0.005m) return Results.BadRequest("Tahsilat servis iş emrinin açık bakiyesini aşamaz.");
+            }
             if (request.SaleId is int saleId)
             {
                 sale = await db.Sales.FirstOrDefaultAsync(s => s.Id == saleId);
                 if (sale is null) return Results.NotFound("Satış bulunamadı.");
+                await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM \"Sales\" WHERE \"Id\" = {saleId} FOR UPDATE");
+                await db.Entry(sale).ReloadAsync();
                 if (sale.IsCancelled || sale.Status == "Cancelled") return Results.Conflict("İptal edilmiş satışa tahsilat eklenemez.");
                 if (request.Direction != "In") return Results.BadRequest("Satış tahsilatı giriş yönünde olmalıdır.");
+                if (request.Amount > sale.TotalPrice - sale.PaidAmount + 0.005m) return Results.BadRequest("Tahsilat satışın açık bakiyesini aşamaz.");
             }
             var payment = new Payment
             {
@@ -235,22 +256,26 @@ public static class ErpEndpoints
                 Amount = decimal.Round(request.Amount, 2),
                 SaleId = request.SaleId,
                 DealerId = ScopeDealer(ctx) ?? request.DealerId,
-                CustomerId = request.CustomerId,
+                CustomerId = request.CustomerId ?? serviceOrder?.CustomerId,
+                ServiceOrderId = request.ServiceOrderId,
                 Counterparty = Clean(request.Counterparty),
                 Note = Clean(request.Note),
                 PaymentDate = request.PaymentDate?.ToUniversalTime() ?? DateTime.UtcNow,
+                IdempotencyKey = idempotencyKey,
             };
             db.Payments.Add(payment);
             await db.SaveChangesAsync();
             if (sale is not null)
                 sale.PaidAmount = Math.Min(sale.TotalPrice, sale.PaidAmount + payment.Amount);
+            if (serviceOrder is not null)
+                serviceOrder.PaidAmount = Math.Min(serviceOrder.Total, serviceOrder.PaidAmount + payment.Amount);
             db.AuditLogs.Add(new AuditLog
             {
                 Username = ctx.Items["username"]?.ToString() ?? "system",
                 Action = "create",
                 Entity = "Payment",
                 EntityId = payment.Id.ToString(),
-                Details = $"{payment.Direction} {payment.Method} {payment.Amount:N2} TL{(sale is null ? "" : $" · Satış #{sale.Id}")}",
+                Details = $"{payment.Direction} {payment.Method} {payment.Amount:N2} TL{(sale is null ? "" : $" · Satış #{sale.Id}")}{(serviceOrder is null ? "" : $" · Servis #{serviceOrder.OrderNo}")}",
             });
             await acc.PostPaymentAsync(payment);
             await db.SaveChangesAsync();
@@ -290,6 +315,11 @@ public static class ErpEndpoints
         t.Quantity, t.UnitCost, t.TransferType, t.Status, t.Note, t.CreatedAt, t.ShippedAt, t.ReceivedAt,
     };
 
+    static string? ReadIdempotencyKey(HttpContext ctx)
+    {
+        var value = ctx.Request.Headers["Idempotency-Key"].ToString().Trim();
+        return value.Length > 0 ? value : null;
+    }
     static bool IsAdmin(HttpContext c) => c.Items["role"]?.ToString() == "Admin";
     static int? ScopeDealer(HttpContext c) => c.Items["dealerId"] is int id ? id : null;
     static string? Clean(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
@@ -299,4 +329,4 @@ public record DealerRequest(string Code, string Name, string? City, string? Phon
 public record TransferRequest(int MotorcycleId, int FromDealerId, int ToDealerId, int Quantity, string TransferType, string? Note);
 public record ManualJournalRequest(string Description, DateTime? EntryDate, List<ManualJournalLine> Lines);
 public record ManualJournalLine(string Code, decimal Debit, decimal Credit, string? Memo);
-public record PaymentRequest(string Direction, string Method, decimal Amount, int? SaleId, int? DealerId, int? CustomerId, string? Counterparty, string? Note, DateTime? PaymentDate);
+public record PaymentRequest(string Direction, string Method, decimal Amount, int? SaleId, int? DealerId, int? CustomerId, string? Counterparty, string? Note, DateTime? PaymentDate, int? ServiceOrderId = null);

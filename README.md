@@ -15,7 +15,8 @@ Built with **.NET 10**, **React 19 / TypeScript** and **PostgreSQL 18**. The int
 - **Real multi-tenancy, not a `WHERE tenantId = ?` afterthought.** Every tenant-owned entity has a required `TenantId`, EF Core query filters fail closed when no tenant context exists, writes are stamped server-side, and composite foreign keys stop cross-tenant references at the database level.
 - **Stock and accounting stay consistent.** Sales, edits and cancellations run in a transaction, adjust the correct branch stock, post double-entry journal records and reverse them on correction. Cancelling a sale also removes its linked collections and reverses their journal entries.
 - **Cost-aware profitability.** Weighted-average purchase cost, cost snapshot at sale time, and accessory/service cost tracking so reported gross profit is not inflated.
-- **Operational safety.** Audit trail for sensitive actions, login rate limiting, subscription/trial enforcement with a grace period, database-aware health checks, and a documented backup/restore drill.
+- **Operational safety.** Audit trail for sensitive actions, login rate limiting and lockout, token-version session revocation, subscription/trial enforcement with a grace period, database-aware health checks, and a documented backup/restore drill.
+- **Concurrency and repeatable writes.** PostgreSQL `xmin` optimistic concurrency on stock, sales, parts and service orders; `Idempotency-Key` support for sales and payments; customer-row locks and credit-limit checks for concurrent receivables.
 
 ---
 
@@ -27,7 +28,9 @@ Built with **.NET 10**, **React 19 / TypeScript** and **PostgreSQL 18**. The int
 - Accessory and service line items with their own price and cost.
 - Admin-only sale editing with automatic stock correction and accounting re-posting.
 - Sale cancellation with stock return, payment cleanup and journal reversal.
-- Customer cards, phone search and per-customer sales history.
+- Customer cards, phone search, per-customer sales history and current-account view.
+- Due dates, installment plans, receivables aging (current / 1-30 / 31-60 / 61-90 / 90+) and CSV export.
+- Per-customer credit limit shared by sales and invoiced service orders.
 - Stock ledger (opening, purchase, manual in/out, sale, return, transfer) and low-stock warnings.
 
 ### Branches & multi-tenancy
@@ -42,6 +45,12 @@ Built with **.NET 10**, **React 19 / TypeScript** and **PostgreSQL 18**. The int
 - Turkish-format CSV export (UTF-8 BOM, semicolon separated).
 - Date filters interpreted in the tenant time zone (`Europe/Istanbul` by default).
 
+### Service & parts
+- Dedicated service work orders with open → in progress → ready → invoiced/cancelled flow.
+- Labour and part lines, part stock deduction on invoice, and service invoices posted to accounting (600/621/153).
+- Parts catalogue, manual stock in/out and stock movements tied to service orders.
+- Cash/card/credit service invoicing; credit balances appear in the customer account and aging report.
+
 ### Catalogue & operations
 - Public, tenant-scoped catalogue with branding, filters and WhatsApp contact link.
 - Shared workflow records for calendar, service, purchasing, trade-in, CRM, finance and automation.
@@ -49,6 +58,7 @@ Built with **.NET 10**, **React 19 / TypeScript** and **PostgreSQL 18**. The int
 
 ### Platform & security
 - PBKDF2-SHA256 password hashing (210k iterations) and signed 8-hour bearer tokens.
+- Token-version session revocation: logout, password change/reset and deactivation invalidate existing tokens; 5 failed logins lock the account for 15 minutes.
 - Admin/Staff/Dealer role checks enforced in API middleware, not only in the UI.
 - Login rate limit (10 attempts/minute/IP), trial and subscription expiry enforcement (`402`).
 - Public health endpoint that also probes PostgreSQL.
@@ -164,6 +174,11 @@ Covered scenarios:
 - cancelling a sale restores stock, removes linked payments and reverses journals;
 - payments cannot be added to a cancelled sale;
 - one tenant cannot read or update another tenant's records;
+- concurrent sales cannot oversell the same stock;
+- a repeated `Idempotency-Key` does not create a second sale;
+- a sale above the customer credit limit is rejected;
+- service invoicing deducts part stock, posts accounting and appears in receivables aging;
+- password change, logout and reset invalidate older tokens;
 - an expired trial blocks business endpoints with `402` while profile and plan requests still work.
 
 Frontend checks:
@@ -212,10 +227,10 @@ The current release is a working pilot, not a finished commercial ERP. Planned w
 
 - online subscription billing and payment-provider webhooks;
 - email/WhatsApp notifications, invitations and password reset;
-- TOTP two-factor authentication and session revocation;
+- TOTP two-factor authentication and device/session list;
 - PDF invoices/quotes and Excel exports;
-- dedicated service work orders, parts catalogue, purchasing and customer current accounts;
-- pagination and row-level locking for high-volume concurrent sales;
+- purchasing/supplier orders and trade-in valuation;
+- pagination and advisory locking for very high-volume concurrent sales;
 - managed object storage for vehicle images.
 
 The full delivery plan is in [`docs/SAAS_ROADMAP.md`](docs/SAAS_ROADMAP.md).
@@ -224,4 +239,4 @@ The full delivery plan is in [`docs/SAAS_ROADMAP.md`](docs/SAAS_ROADMAP.md).
 
 ## Status
 
-Actively developed. The API builds with zero errors, the four PostgreSQL integration tests pass, the frontend lints with zero errors and the production bundle builds successfully. See [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for the latest verification details.
+Actively developed. The API builds with zero errors, the 11 PostgreSQL integration tests pass, the frontend lints with zero errors (one pre-existing exhaustive-deps warning) and the production bundle builds successfully. See [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for the latest verification details.

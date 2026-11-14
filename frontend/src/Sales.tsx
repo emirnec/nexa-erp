@@ -78,6 +78,8 @@ type EditDraft = {
   cash: string;
   card: string;
   installments: string;
+  dueDate: string;
+  planInstallments: string;
   status: string;
   channel: string;
   extras: ExtraDraft[];
@@ -102,6 +104,8 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
   const [cash, setCash] = useState("");
   const [card, setCard] = useState("");
   const [installments, setInstallments] = useState("1");
+  const [dueDate, setDueDate] = useState("");
+  const [planInstallments, setPlanInstallments] = useState("1");
   const [extras, setExtras] = useState<ExtraDraft[]>([]);
   const [saving, setSaving] = useState(false);
   const [lastSale, setLastSale] = useState<Sale | null>(null);
@@ -176,6 +180,8 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
         cashAmount: cash.trim() === "" ? null : cashValue,
         cardAmount: card.trim() === "" ? null : cardValue,
         cardInstallments: cardValue > 0 ? Number(installments) || 1 : null,
+        dueDate: remaining > 0.005 && dueDate ? new Date(dueDate).toISOString() : null,
+        installmentCount: remaining > 0.005 ? Number(planInstallments) || 1 : null,
         extras: extrasPayload(extras),
       }));
       if (!response.ok) throw new Error(await errorText(response, "Satış tamamlanamadı."));
@@ -183,7 +189,7 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
       setLastSale({ ...created, motorcycle: created.motorcycle ?? `${moto.brand} ${moto.model}` });
       toast("success", `Satış tamamlandı: ${moto.brand} ${moto.model} — ${money(created.totalPrice)}`);
       setMotoId(""); setCustomerId(""); setName(""); setPhone(""); setQty("1"); setUnitPrice("");
-      setCash(""); setCard(""); setInstallments("1"); setExtras([]); setSaleDate(toLocalInput());
+      setCash(""); setCard(""); setInstallments("1"); setDueDate(""); setPlanInstallments("1"); setExtras([]); setSaleDate(toLocalInput());
       await reload();
     } catch (err) { toast("error", err instanceof Error ? err.message : "Satış yapılamadı."); }
     finally { setSaving(false); }
@@ -202,6 +208,8 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
       cash: (s.cashAmount ?? 0) > 0 ? String(s.cashAmount) : "",
       card: (s.cardAmount ?? 0) > 0 ? String(s.cardAmount) : "",
       installments: String(s.cardInstallments && s.cardInstallments > 0 ? s.cardInstallments : 1),
+      dueDate: s.dueDate ? toLocalInput(s.dueDate).slice(0, 10) : "",
+      planInstallments: String(s.installmentCount || 1),
       status: s.status ?? "Delivered",
       channel: s.channel ?? "Retail",
       extras: (s.extras ?? []).map((x) => ({
@@ -243,6 +251,8 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
         cashAmount: edit.cash.trim() === "" ? null : editCash,
         cardAmount: edit.card.trim() === "" ? null : editCard,
         cardInstallments: editCard > 0 ? Number(edit.installments) || 1 : null,
+        dueDate: editRemaining > 0.005 && edit.dueDate ? new Date(`${edit.dueDate}T12:00:00`).toISOString() : null,
+        installmentCount: editRemaining > 0.005 ? Number(edit.planInstallments) || 1 : null,
         extras: extrasPayload(edit.extras),
       }));
       if (!response.ok) throw new Error(await errorText(response, "Satış güncellenemedi."));
@@ -361,6 +371,10 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
             <Field label="Kart taksit sayısı" hint={cardValue > 0 ? "Kart tutarı bu sayıya bölünür." : "Kart tutarı girilince aktifleşir."}>
               <input type="number" min="1" max="36" step="1" value={installments} onChange={(e) => setInstallments(e.target.value)} disabled={cardValue <= 0} />
             </Field>
+            {remaining > 0.005 && <>
+              <Field label="İlk vade tarihi" hint="Açık bakiye için taksit planı oluşturulur."><input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
+              <Field label="Vade taksit sayısı"><input type="number" min="1" max="36" step="1" value={planInstallments} onChange={(e) => setPlanInstallments(e.target.value)} /></Field>
+            </>}
             <Field label="Ek ürün ve hizmetler" className="span-all" hint="Aksesuar, yükseltme, montaj, sigorta vb. satışa eklenir ve toplama yansır. Maliyet girilirse kâr doğru hesaplanır.">
               <div className="extra-editor">
                 {extras.length > 0 && (
@@ -462,6 +476,10 @@ export default function Sales({ motorcycles, sales, customers, dealers, role, lo
             <Field label="Kartla tahsilat (TL)"><input type="number" min="0" step="0.01" value={edit.card} onChange={(e) => setEdit({ ...edit, card: e.target.value })} placeholder="0" /></Field>
             <Field label="Kart taksit sayısı"><input type="number" min="1" max="36" step="1" value={edit.installments} onChange={(e) => setEdit({ ...edit, installments: e.target.value })} disabled={editCard <= 0} /></Field>
             <Field label="Kalan (açık bakiye)"><input value={money(editRemaining)} readOnly /></Field>
+            {editRemaining > 0.005 && <>
+              <Field label="İlk vade"><input type="date" value={edit.dueDate} onChange={(e) => setEdit({ ...edit, dueDate: e.target.value })} /></Field>
+              <Field label="Vade taksit sayısı"><input type="number" min="1" max="36" step="1" value={edit.planInstallments} onChange={(e) => setEdit({ ...edit, planInstallments: e.target.value })} /></Field>
+            </>}
             <Field label="Ek ürün ve hizmetler" className="span-all">
               <div className="extra-editor">
                 {edit.extras.length > 0 && (

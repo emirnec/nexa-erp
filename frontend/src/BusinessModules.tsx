@@ -9,13 +9,18 @@ import {
 } from "./utils";
 
 /* ═════════════ MÜŞTERİLER ═════════════ */
-export function CustomersPage({ customers, reload, initialSearch = "" }: { customers: Customer[]; reload: () => Promise<void>; initialSearch?: string }) {
+export function CustomersPage({ customers, role, reload, initialSearch = "" }: { customers: Customer[]; role: Role; reload: () => Promise<void>; initialSearch?: string }) {
   const { toast } = useUi();
+  const isAdmin = role === "Admin";
   const [search, setSearch] = useState(initialSearch);
   const [editing, setEditing] = useState<Customer | "new" | null>(null);
-  const [form, setForm] = useState({ fullName: "", phone: "", email: "", notes: "" });
+  const [form, setForm] = useState({ fullName: "", phone: "", email: "", notes: "", creditLimit: "0" });
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState<{ customer: Customer; sales: Sale[] } | null>(null);
+  const [account, setAccount] = useState<{
+    customer: Customer; totalOutstanding: number; creditLimit: number; creditAvailable?: number | null;
+    sales: { id: number; invoiceNo?: string | null; saleDate: string; totalPrice: number; paidAmount: number; outstanding: number; dueDate?: string | null; isCancelled: boolean }[];
+  } | null>(null);
 
   const rows = useMemo(() => {
     const q = trLower(search.trim());
@@ -23,7 +28,7 @@ export function CustomersPage({ customers, reload, initialSearch = "" }: { custo
   }, [customers, search]);
 
   function openForm(c: Customer | "new") {
-    setForm(c === "new" ? { fullName: "", phone: "", email: "", notes: "" } : { fullName: c.fullName, phone: c.phone ?? "", email: c.email ?? "", notes: c.notes ?? "" });
+    setForm(c === "new" ? { fullName: "", phone: "", email: "", notes: "", creditLimit: "0" } : { fullName: c.fullName, phone: c.phone ?? "", email: c.email ?? "", notes: c.notes ?? "", creditLimit: String(c.creditLimit ?? 0) });
     setEditing(c);
   }
 
@@ -32,7 +37,7 @@ export function CustomersPage({ customers, reload, initialSearch = "" }: { custo
     setSaving(true);
     try {
       const isNew = editing === "new";
-      const body = { fullName: form.fullName.trim(), phone: form.phone.trim() || null, email: form.email.trim() || null, notes: form.notes.trim() || null };
+      const body = { fullName: form.fullName.trim(), phone: form.phone.trim() || null, email: form.email.trim() || null, notes: form.notes.trim() || null, creditLimit: isAdmin ? Number(form.creditLimit) || 0 : 0 };
       const r = await api(isNew ? "/customers" : `/customers/${(editing as Customer).id}`, jsonInit(isNew ? "POST" : "PUT", body));
       if (!r.ok) throw new Error(await errorText(r, "Müşteri kaydedilemedi."));
       toast("success", isNew ? "Müşteri kaydedildi." : "Müşteri güncellendi.");
@@ -40,6 +45,12 @@ export function CustomersPage({ customers, reload, initialSearch = "" }: { custo
       await reload();
     } catch (err) { toast("error", err instanceof Error ? err.message : "Müşteri kaydedilemedi."); }
     finally { setSaving(false); }
+  }
+
+  async function openAccount(c: Customer) {
+    const response = await api(`/customers/${c.id}/account`);
+    if (!response.ok) return toast("error", await errorText(response, "Cari hesap alınamadı."));
+    setAccount(await response.json());
   }
 
   async function openHistory(c: Customer) {
@@ -52,9 +63,11 @@ export function CustomersPage({ customers, reload, initialSearch = "" }: { custo
     { key: "name", header: "Ad soyad", sort: (c) => c.fullName, render: (c) => <span className="cell-title">{c.fullName}</span> },
     { key: "phone", header: "Telefon", render: (c) => c.phone || <span className="muted-text">—</span> },
     { key: "email", header: "E-posta", render: (c) => c.email || <span className="muted-text">—</span> },
+    { key: "limit", header: "Kredi limiti", align: "right", sort: (c) => c.creditLimit ?? 0, render: (c) => c.creditLimit && c.creditLimit > 0 ? money(c.creditLimit) : <span className="muted-text">Limit yok</span> },
     { key: "notes", header: "Not", render: (c) => c.notes ? <span title={c.notes}>{c.notes.length > 32 ? `${c.notes.slice(0, 32)}…` : c.notes}</span> : <span className="muted-text">—</span> },
     { key: "actions", header: "", align: "right", render: (c) => (
       <div className="row-actions">
+        <button type="button" className="icon-btn" title="Cari hesap" aria-label="Cari hesap" onClick={() => void openAccount(c)}><Icon name="credit-card" /></button>
         <button type="button" className="icon-btn" title="Satış geçmişi" aria-label="Satış geçmişi" onClick={() => void openHistory(c)}><Icon name="history" /></button>
         <button type="button" className="icon-btn" title="Düzenle" aria-label="Düzenle" onClick={() => openForm(c)}><Icon name="edit" /></button>
       </div>) },
@@ -79,8 +92,30 @@ export function CustomersPage({ customers, reload, initialSearch = "" }: { custo
             <Field label="Ad soyad" className="span-all"><input value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} required /></Field>
             <Field label="Telefon"><input type="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="05xx xxx xx xx" /></Field>
             <Field label="E-posta"><input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+            <Field label="Kredi limiti (TL)" hint={isAdmin ? "0 = limit yok. Vadeli satışlarda açık bakiye bu limiti aşamaz." : "Kredi limitini yalnızca yönetici belirler."}><input type="number" min="0" step="0.01" value={form.creditLimit} onChange={(e) => setForm({ ...form, creditLimit: e.target.value })} disabled={!isAdmin} /></Field>
             <Field label="Not" className="span-all"><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="İsteğe bağlı" /></Field>
           </form>
+        </Modal>
+      )}
+
+      {account && (
+        <Modal title={`${account.customer.fullName} — Cari Hesap`} size="lg" onClose={() => setAccount(null)}
+          footer={<button type="button" className="btn btn-ghost" onClick={() => setAccount(null)}>Kapat</button>}>
+          <div className="mini-stats">
+            <div className="mini-stat"><span>Açık bakiye</span><strong>{money(account.totalOutstanding)}</strong></div>
+            <div className="mini-stat"><span>Kredi limiti</span><strong>{account.creditLimit > 0 ? money(account.creditLimit) : "Limit yok"}</strong></div>
+            <div className="mini-stat"><span>Kullanılabilir</span><strong>{account.creditAvailable == null ? "—" : money(account.creditAvailable)}</strong></div>
+          </div>
+          <DataTable rows={account.sales} rowKey={(s) => s.id} pageSize={8}
+            empty={<EmptyState icon="cart" title="Cari hareket yok" />}
+            columns={[
+              { key: "id", header: "No", render: (s) => `#${s.id}` },
+              { key: "d", header: "Tarih", render: (s) => fmtDate(s.saleDate) },
+              { key: "t", header: "Tutar", align: "right", render: (s) => money(s.totalPrice) },
+              { key: "p", header: "Ödenen", align: "right", render: (s) => money(s.paidAmount) },
+              { key: "o", header: "Kalan", align: "right", render: (s) => <span className={s.outstanding > 0 ? "negative-text" : "positive-text"}>{money(s.outstanding)}</span> },
+              { key: "v", header: "Vade", render: (s) => s.dueDate ? fmtDate(s.dueDate) : "—" },
+            ]} />
         </Modal>
       )}
 

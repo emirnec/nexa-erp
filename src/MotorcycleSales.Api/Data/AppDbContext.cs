@@ -29,6 +29,11 @@ public class AppDbContext : DbContext
     public DbSet<WorkflowRecord> WorkflowRecords => Set<WorkflowRecord>();
     public DbSet<CatalogListing> CatalogListings => Set<CatalogListing>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+    public DbSet<SaleInstallment> SaleInstallments => Set<SaleInstallment>();
+    public DbSet<Part> Parts => Set<Part>();
+    public DbSet<PartStockMovement> PartStockMovements => Set<PartStockMovement>();
+    public DbSet<ServiceOrder> ServiceOrders => Set<ServiceOrder>();
+    public DbSet<ServiceOrderItem> ServiceOrderItems => Set<ServiceOrderItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -60,6 +65,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<WorkflowRecord>().HasOne<Motorcycle>().WithMany().HasForeignKey(w => w.MotorcycleId).OnDelete(DeleteBehavior.Restrict);
         modelBuilder.Entity<WorkflowRecord>().HasOne<Dealer>().WithMany().HasForeignKey(w => w.DealerId).OnDelete(DeleteBehavior.Restrict);
         modelBuilder.Entity<CatalogListing>().HasOne<Motorcycle>().WithMany().HasForeignKey(c => c.MotorcycleId).OnDelete(DeleteBehavior.Restrict);
+        modelBuilder.Entity<SaleInstallment>().HasOne(x => x.Sale).WithMany(s => s.Installments).HasForeignKey(x => x.SaleId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<ServiceOrder>().HasOne(x => x.Customer).WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
+        modelBuilder.Entity<ServiceOrder>().HasOne(x => x.Motorcycle).WithMany().HasForeignKey(x => x.MotorcycleId).OnDelete(DeleteBehavior.Restrict);
+        modelBuilder.Entity<ServiceOrderItem>().HasOne(x => x.ServiceOrder).WithMany(x => x.Items).HasForeignKey(x => x.ServiceOrderId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<ServiceOrderItem>().HasOne(x => x.Part).WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
+        modelBuilder.Entity<PartStockMovement>().HasOne(x => x.Part).WithMany().HasForeignKey(x => x.PartId).OnDelete(DeleteBehavior.Restrict);
+        modelBuilder.Entity<Payment>().HasOne<ServiceOrder>().WithMany().HasForeignKey(p => p.ServiceOrderId).OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<Sale>().Property(s => s.UnitPrice).HasPrecision(18, 2);
         modelBuilder.Entity<Sale>().Property(s => s.UnitCostAtSale).HasPrecision(18, 2);
@@ -80,6 +92,25 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<JournalLine>().Property(l => l.Credit).HasPrecision(18, 2);
         modelBuilder.Entity<Payment>().Property(p => p.Amount).HasPrecision(18, 2);
         modelBuilder.Entity<WorkflowRecord>().Property(x => x.Amount).HasPrecision(18, 2);
+        modelBuilder.Entity<Customer>().Property(c => c.CreditLimit).HasPrecision(18, 2);
+        modelBuilder.Entity<SaleInstallment>().Property(x => x.Amount).HasPrecision(18, 2);
+        modelBuilder.Entity<Part>().Property(x => x.PurchaseCost).HasPrecision(18, 2);
+        modelBuilder.Entity<Part>().Property(x => x.SalePrice).HasPrecision(18, 2);
+        modelBuilder.Entity<PartStockMovement>().Property(x => x.UnitCost).HasPrecision(18, 2);
+        modelBuilder.Entity<ServiceOrder>().Property(x => x.TotalLabor).HasPrecision(18, 2);
+        modelBuilder.Entity<ServiceOrder>().Property(x => x.TotalParts).HasPrecision(18, 2);
+        modelBuilder.Entity<ServiceOrder>().Property(x => x.Total).HasPrecision(18, 2);
+        modelBuilder.Entity<ServiceOrder>().Property(x => x.PaidAmount).HasPrecision(18, 2);
+        modelBuilder.Entity<ServiceOrderItem>().Property(x => x.UnitPrice).HasPrecision(18, 2);
+        modelBuilder.Entity<ServiceOrderItem>().Property(x => x.UnitCost).HasPrecision(18, 2);
+
+        // PostgreSQL xmin sistem kolonu, aynı stok/kayıt satırına eşzamanlı
+        // yazmaları iyimser eşzamanlılık hatasına dönüştürür.
+        modelBuilder.Entity<Motorcycle>().Property<uint>("xmin").IsRowVersion();
+        modelBuilder.Entity<DealerStock>().Property<uint>("xmin").IsRowVersion();
+        modelBuilder.Entity<Sale>().Property<uint>("xmin").IsRowVersion();
+        modelBuilder.Entity<Part>().Property<uint>("xmin").IsRowVersion();
+        modelBuilder.Entity<ServiceOrder>().Property<uint>("xmin").IsRowVersion();
         // PostgreSQL upgrade scripts create these as jsonb; map string properties so Npgsql
         // sends jsonb parameters instead of text (otherwise INSERT/UPDATE fails with 42804).
         modelBuilder.Entity<WorkflowRecord>().Property(x => x.Payload).HasColumnType("jsonb");
@@ -97,6 +128,14 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<AuditLog>().HasIndex(x => new { x.TenantId, x.CreatedAt });
         modelBuilder.Entity<SaleExtra>().HasIndex(x => new { x.TenantId, x.SaleId });
         modelBuilder.Entity<Sale>().HasIndex(x => new { x.TenantId, x.SaleDate });
+        modelBuilder.Entity<Sale>().HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+        modelBuilder.Entity<Payment>().HasIndex(x => new { x.TenantId, x.IdempotencyKey }).IsUnique().HasFilter("\"IdempotencyKey\" IS NOT NULL");
+        modelBuilder.Entity<SaleInstallment>().HasIndex(x => new { x.TenantId, x.SaleId, x.Sequence }).IsUnique();
+        modelBuilder.Entity<Part>().HasIndex(x => new { x.TenantId, x.Code }).IsUnique();
+        modelBuilder.Entity<ServiceOrder>().HasIndex(x => new { x.TenantId, x.OrderNo }).IsUnique();
+        modelBuilder.Entity<ServiceOrder>().HasIndex(x => new { x.TenantId, x.Status, x.OpenedAt });
+        modelBuilder.Entity<ServiceOrderItem>().HasIndex(x => new { x.TenantId, x.ServiceOrderId });
+        modelBuilder.Entity<PartStockMovement>().HasIndex(x => new { x.TenantId, x.PartId, x.CreatedAt });
 
         // A missing tenant context returns no tenant-owned rows (fail closed).
         foreach (var entityType in modelBuilder.Model.GetEntityTypes().Where(t => typeof(ITenantEntity).IsAssignableFrom(t.ClrType)))

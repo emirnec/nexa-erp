@@ -55,7 +55,17 @@ app.Use(async (context, next) =>
         app.Logger.LogError(ex, "Unhandled error for {Method} {Path}", context.Request.Method, context.Request.Path);
         if (context.Response.HasStarted) throw;
         context.Response.Clear();
-        if (schemaOutdated)
+        if (ex is DbUpdateConcurrencyException || pg?.SqlState is "40001" or "40P01")
+        {
+            context.Response.StatusCode = StatusCodes.Status409Conflict;
+            await context.Response.WriteAsJsonAsync(new { code = "concurrency_conflict", message = "Kayıt başka bir işlem tarafından değiştirildi. Lütfen tekrar deneyin." });
+        }
+        else if (pg?.SqlState == "23505")
+        {
+            context.Response.StatusCode = StatusCodes.Status409Conflict;
+            await context.Response.WriteAsJsonAsync(new { code = "duplicate_record", message = "Bu kayıt zaten oluşturulmuş. Listeyi yenileyip tekrar deneyin." });
+        }
+        else if (schemaOutdated)
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             await context.Response.WriteAsJsonAsync(new { message = "Veritabanı şeması güncel değil (satış ödeme/ek kalem kolonları eksik). Sunucuda database/upgrade_v5_sale_payments.sql dosyasını uygulayıp API'yi yeniden başlatın." });
@@ -78,7 +88,7 @@ app.Use(async (context, next) =>
 
     var header = context.Request.Headers.Authorization.ToString();
     if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ||
-        !TryReadToken(header[7..], jwtSecret, out var username, out var role, out var tenantId))
+        !TryReadToken(header[7..], jwtSecret, out var username, out var role, out var tenantId, out var tokenVersion))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await context.Response.WriteAsJsonAsync(new { message = "Oturum gerekli veya süresi dolmuş. Yeniden giriş yapın." });
@@ -96,10 +106,10 @@ app.Use(async (context, next) =>
     authDb.CurrentTenantId = tenantId;
     var user = await authDb.AppUsers.IgnoreQueryFilters().AsNoTracking()
         .FirstOrDefaultAsync(u => u.TenantId == tenantId && u.Username == username && u.IsActive && u.Role == role);
-    if (user is null)
+    if (user is null || user.TokenVersion != tokenVersion)
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        await context.Response.WriteAsJsonAsync(new { message = "Kullanıcı hesabı aktif değil." });
+        await context.Response.WriteAsJsonAsync(new { message = "Kullanıcı hesabı aktif değil veya oturum sonlandırılmış. Yeniden giriş yapın." });
         return;
     }
 
@@ -147,6 +157,8 @@ app.MapGet("/api/health", async (AppDbContext db) =>
     return databaseOk ? Results.Ok(payload) : Results.Json(payload, statusCode: StatusCodes.Status503ServiceUnavailable);
 });
 app.MapErp();
+app.MapCrm();
+app.MapService();
 app.MapOperations();
 
 // İlk kurulum: yalnızca hiç kullanıcı yokken bir yönetici oluşturulabilir.
@@ -185,7 +197,7 @@ app.MapPost("/api/auth/bootstrap", async (BootstrapRequest request, AppDbContext
     var user = new AppUser { Username = request.Username.Trim(), PasswordHash = HashPassword(request.Password), Role = "Admin" };
     db.AppUsers.Add(user); await db.SaveChangesAsync();
     await accounting.EnsureReadyAsync();
-    return Results.Ok(new { token = CreateToken(user.Username, user.Role, tenant.Id, jwtSecret), username = user.Username, role = user.Role, tenantId = tenant.Id, tenantSlug = tenant.Slug, tenantName = tenant.Name });
+    return Results.Ok(new { token = CreateToken(user, tenant.Id, jwtSecret), username = user.Username, role = user.Role, tenantId = tenant.Id, tenantSlug = tenant.Slug, tenantName = tenant.Name });
 });
 app.MapPost("/api/auth/login", async (LoginRequest request, AppDbContext db, AccountingService accounting) =>
 {
@@ -206,9 +218,27 @@ app.MapPost("/api/auth/login", async (LoginRequest request, AppDbContext db, Acc
     if (tenant is null) return Results.Unauthorized();
     db.CurrentTenantId = tenant.Id;
     var user = await db.AppUsers.IgnoreQueryFilters().FirstOrDefaultAsync(u => u.TenantId == tenant.Id && u.Username == request.Username.Trim() && u.IsActive);
-    if (user is null || !VerifyPassword(request.Password, user.PasswordHash)) return Results.Unauthorized();
+    if (user is null) return Results.Unauthorized();
+    var now = DateTime.UtcNow;
+    if (user.LockoutUntil is DateTime lockout && lockout > now)
+        return Results.Json(new { code = "account_locked", message = $"Çok fazla hatalı deneme. {Math.Ceiling((lockout - now).TotalMinutes)} dakika sonra tekrar deneyin." }, statusCode: StatusCodes.Status423Locked);
+    if (!VerifyPassword(request.Password, user.PasswordHash))
+    {
+        user.FailedLoginCount++;
+        if (user.FailedLoginCount >= 5)
+        {
+            user.FailedLoginCount = 0;
+            user.LockoutUntil = now.AddMinutes(15);
+        }
+        await db.SaveChangesAsync();
+        return Results.Unauthorized();
+    }
+    user.FailedLoginCount = 0;
+    user.LockoutUntil = null;
+    user.LastLoginAt = now;
+    await db.SaveChangesAsync();
     await accounting.EnsureReadyAsync();
-    return Results.Ok(new { token = CreateToken(user.Username, user.Role, tenant.Id, jwtSecret), username = user.Username, role = user.Role, tenantId = tenant.Id, tenantSlug = tenant.Slug, tenantName = tenant.Name });
+    return Results.Ok(new { token = CreateToken(user, tenant.Id, jwtSecret), username = user.Username, role = user.Role, tenantId = tenant.Id, tenantSlug = tenant.Slug, tenantName = tenant.Name });
 }).RequireRateLimiting("login");
 app.MapPost("/api/platform/tenants/provision", async (ProvisionTenantRequest request, HttpContext ctx, AppDbContext db, AccountingService accounting) =>
 {
@@ -246,9 +276,22 @@ app.MapPost("/api/auth/password", async (ChangePasswordRequest request, HttpCont
     if (user is null) return Results.NotFound();
     if (!VerifyPassword(request.CurrentPassword, user.PasswordHash)) return Results.BadRequest("Mevcut parola doğru değil.");
     user.PasswordHash = HashPassword(request.NewPassword);
-    db.AuditLogs.Add(new AuditLog { Username = username, Action = "password-change", Entity = "AppUser", EntityId = user.Id.ToString(), Details = "Kullanıcı kendi parolasını değiştirdi." });
+    user.TokenVersion++;
+    user.LastPasswordChangedAt = DateTime.UtcNow;
+    user.MustChangePassword = false;
+    db.AuditLogs.Add(new AuditLog { Username = username, Action = "password-change", Entity = "AppUser", EntityId = user.Id.ToString(), Details = "Kullanıcı kendi parolasını değiştirdi; tüm eski oturumlar kapatıldı." });
     await db.SaveChangesAsync();
     return Results.Ok(new { message = "Parola güncellendi. Güvenlik için yeniden giriş yapın." });
+});
+app.MapPost("/api/auth/logout", async (HttpContext ctx, AppDbContext db) =>
+{
+    var username = ctx.Items["username"]?.ToString() ?? "";
+    var user = await db.AppUsers.FirstOrDefaultAsync(u => u.Username == username);
+    if (user is null) return Results.NoContent();
+    user.TokenVersion++;
+    db.AuditLogs.Add(new AuditLog { Username = username, Action = "logout", Entity = "AppUser", EntityId = user.Id.ToString(), Details = "Kullanıcı tüm oturumlarını kapattı." });
+    await db.SaveChangesAsync();
+    return Results.Ok(new { message = "Oturum kapatıldı." });
 });
 app.MapGet("/api/tenant/current", async (HttpContext ctx, AppDbContext db) =>
 {
@@ -310,7 +353,10 @@ app.MapPost("/api/users/{id:int}/password", async (int id, HttpContext ctx, Admi
     var user = await db.AppUsers.FirstOrDefaultAsync(x => x.Id == id);
     if (user is null) return Results.NotFound();
     user.PasswordHash = HashPassword(request.NewPassword);
-    db.AuditLogs.Add(new AuditLog { Username = ctx.Items["username"]?.ToString() ?? "system", Action = "password-reset", Entity = "AppUser", EntityId = user.Id.ToString(), Details = $"{user.Username} kullanıcısının parolası yönetici tarafından sıfırlandı." });
+    user.TokenVersion++;
+    user.MustChangePassword = true;
+    user.LastPasswordChangedAt = DateTime.UtcNow;
+    db.AuditLogs.Add(new AuditLog { Username = ctx.Items["username"]?.ToString() ?? "system", Action = "password-reset", Entity = "AppUser", EntityId = user.Id.ToString(), Details = $"{user.Username} kullanıcısının parolası yönetici tarafından sıfırlandı; eski oturumlar kapatıldı." });
     await db.SaveChangesAsync();
     return Results.Ok(new { user.Id, message = "Parola sıfırlandı. Kullanıcı yeni parolayla giriş yapabilir." });
 });
@@ -319,7 +365,9 @@ app.MapPatch("/api/users/{id:int}/active", async (int id, HttpContext ctx, UserA
     if (!IsAdmin(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
     var user = await db.AppUsers.FirstOrDefaultAsync(x => x.Id == id); if (user is null) return Results.NotFound();
     if (user.Username == ctx.Items["username"]?.ToString() && !request.IsActive) return Results.BadRequest("Kendi hesabınızı devre dışı bırakamazsınız.");
-    user.IsActive = request.IsActive; await db.SaveChangesAsync(); return Results.Ok(new { user.Id, user.IsActive });
+    user.IsActive = request.IsActive;
+    if (!request.IsActive) user.TokenVersion++;
+    await db.SaveChangesAsync(); return Results.Ok(new { user.Id, user.IsActive });
 });
 
 app.MapGet("/api/db-test", async (AppDbContext db) => Results.Ok(new { connected = await db.Database.CanConnectAsync(), database = "MotorcycleSalesAPP" }));
@@ -377,17 +425,18 @@ app.MapGet("/api/customers", async (string? search, AppDbContext db) =>
     if (!string.IsNullOrWhiteSpace(search)) query = query.Where(c => c.FullName.Contains(search) || (c.Phone != null && c.Phone.Contains(search)));
     return Results.Ok(await query.OrderBy(c => c.FullName).Take(500).ToListAsync());
 });
-app.MapPost("/api/customers", async (CustomerRequest request, AppDbContext db) =>
+app.MapPost("/api/customers", async (CustomerRequest request, HttpContext ctx, AppDbContext db) =>
 {
     if (string.IsNullOrWhiteSpace(request.FullName)) return Results.BadRequest("Müşteri adı zorunludur.");
-    var customer = new Customer { FullName = request.FullName.Trim(), Phone = Clean(request.Phone), Email = Clean(request.Email), Notes = Clean(request.Notes) };
+    var customer = new Customer { FullName = request.FullName.Trim(), Phone = Clean(request.Phone), Email = Clean(request.Email), Notes = Clean(request.Notes), CreditLimit = IsAdmin(ctx) ? Math.Max(0, request.CreditLimit) : 0 };
     db.Customers.Add(customer); await db.SaveChangesAsync(); return Results.Created($"/api/customers/{customer.Id}", customer);
 });
-app.MapPut("/api/customers/{id:int}", async (int id, CustomerRequest request, AppDbContext db) =>
+app.MapPut("/api/customers/{id:int}", async (int id, CustomerRequest request, HttpContext ctx, AppDbContext db) =>
 {
     var customer = await db.Customers.FirstOrDefaultAsync(x => x.Id == id); if (customer is null) return Results.NotFound();
     if (string.IsNullOrWhiteSpace(request.FullName)) return Results.BadRequest("Müşteri adı zorunludur.");
     customer.FullName = request.FullName.Trim(); customer.Phone = Clean(request.Phone); customer.Email = Clean(request.Email); customer.Notes = Clean(request.Notes);
+    if (IsAdmin(ctx)) customer.CreditLimit = Math.Max(0, request.CreditLimit);
     await db.SaveChangesAsync(); return Results.Ok(customer);
 });
 app.MapGet("/api/customers/{id:int}/sales", async (int id, AppDbContext db) => Results.Ok(await db.Sales.AsNoTracking().Include(s => s.Motorcycle).Where(s => s.CustomerId == id).OrderByDescending(s => s.SaleDate).ToListAsync()));
@@ -446,6 +495,14 @@ app.MapGet("/api/sales", async (HttpContext ctx, AppDbContext db) =>
 });
 app.MapPost("/api/sales", async (SaleRequest request, HttpContext ctx, AppDbContext db, AccountingService acc) =>
 {
+    var idempotencyKey = ReadIdempotencyKey(ctx);
+            if (idempotencyKey is not null)
+        {
+            if (idempotencyKey.Length > 100) return Results.BadRequest("Idempotency-Key en fazla 100 karakter olabilir.");
+            var existing = await db.Sales.AsNoTracking().Include(s => s.Motorcycle).Include(s => s.Extras).Include(s => s.Installments)
+                .FirstOrDefaultAsync(s => s.IdempotencyKey == idempotencyKey);
+            if (existing is not null) return Results.Ok(SalePayload(existing, existing.Motorcycle));
+        }
     var validation = ValidateSaleRequest(request);
     if (validation is not null) return Results.BadRequest(validation);
     var channel = request.Channel is "DealerRetail" or "Wholesale" or "Retail" ? request.Channel : "Retail";
@@ -475,6 +532,26 @@ app.MapPost("/api/sales", async (SaleRequest request, HttpContext ctx, AppDbCont
     var unitPrice = decimal.Round(request.UnitPrice, 2);
     var totals = ComputeSaleTotals(request);
     var saleDate = request.SaleDate?.ToUniversalTime() ?? DateTime.UtcNow;
+    var installmentCount = Math.Clamp(request.InstallmentCount ?? 0, 0, 36);
+    var firstDueDate = (request.DueDate?.ToUniversalTime() ?? saleDate.AddDays(30));
+    var unpaid = decimal.Round(Math.Max(0m, totals.Total - totals.Paid), 2);
+    if (status != "Reserved" && unpaid > 0)
+    {
+        if (installmentCount == 0) installmentCount = 1;
+        if (customer!.CreditLimit > 0)
+        {
+            // Aynı müşteri için eşzamanlı satışlar limiti birlikte aşmasın diye cari satırı kilitlenir.
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM \"Customers\" WHERE \"Id\" = {customer.Id} FOR UPDATE");
+            var existingOpen = await db.Sales.AsNoTracking()
+                .Where(s => s.CustomerId == customer.Id && !s.IsCancelled)
+                .SumAsync(s => (decimal?)(s.Quantity * s.UnitPrice + s.ExtrasTotal - s.PaidAmount)) ?? 0m;
+            var serviceOpen = await db.ServiceOrders.AsNoTracking()
+                .Where(o => o.CustomerId == customer.Id && o.Status == "Invoiced")
+                .SumAsync(o => (decimal?)(o.Total - o.PaidAmount)) ?? 0m;
+            if (existingOpen + serviceOpen + unpaid > customer.CreditLimit)
+                return Results.BadRequest(new { code = "credit_limit", message = $"Müşteri kredi limiti aşıldı. Açık bakiye {existingOpen + serviceOpen:N2} TL, yeni bakiye {unpaid:N2} TL, limit {customer.CreditLimit:N2} TL." });
+        }
+    }
     var sale = new Sale
     {
         MotorcycleId = motorcycle.Id, CustomerId = customer!.Id, CustomerName = request.CustomerName.Trim(), CustomerPhone = Clean(request.CustomerPhone),
@@ -482,11 +559,15 @@ app.MapPost("/api/sales", async (SaleRequest request, HttpContext ctx, AppDbCont
         DealerId = dealer.Id, Status = status, Channel = dealer.IsHeadquarters ? "Retail" : channel == "Retail" ? "DealerRetail" : channel,
         PaymentMethod = totals.Method, CashAmount = totals.Cash, CardAmount = totals.Card, CardInstallments = totals.Installments,
         ExtrasTotal = totals.ExtrasTotal, PaidAmount = status == "Reserved" ? 0 : totals.Paid,
+        DueDate = unpaid > 0 ? firstDueDate : null,
+        InstallmentCount = unpaid > 0 ? installmentCount : 0,
+        IdempotencyKey = idempotencyKey,
     };
     db.Sales.Add(sale); await db.SaveChangesAsync();
     foreach (var extra in NormalizeSaleExtras(request.Extras))
         db.SaleExtras.Add(new SaleExtra { SaleId = sale.Id, Kind = extra.Kind ?? "Product", Description = extra.Description.Trim(), Quantity = extra.Quantity, UnitPrice = decimal.Round(extra.UnitPrice, 2), UnitCost = decimal.Round(extra.UnitCost, 2) });
     sale.InvoiceNo = status == "Reserved" ? null : $"SF-{sale.Id:D6}";
+    if (status != "Reserved" && unpaid > 0) AddSaleInstallments(db, sale, unpaid, firstDueDate, installmentCount);
     db.StockMovements.Add(new StockMovement { MotorcycleId = motorcycle.Id, MovementType = status == "Reserved" ? "ReserveOut" : "SaleOut", Quantity = request.Quantity, UnitCost = motorcycle.PurchaseCost, SaleId = sale.Id, DealerId = dealer.Id, Note = status == "Reserved" ? $"Rezervasyon #{sale.Id}" : $"Satış #{sale.Id}" });
     await db.SaveChangesAsync();
     if (status != "Reserved")
@@ -499,11 +580,12 @@ app.MapPost("/api/sales", async (SaleRequest request, HttpContext ctx, AppDbCont
     await db.SaveChangesAsync();
     await tx.CommitAsync();
     await db.Entry(sale).Collection(s => s.Extras).LoadAsync();
+    await db.Entry(sale).Collection(s => s.Installments).LoadAsync();
     return Results.Created($"/api/sales/{sale.Id}", SalePayload(sale, motorcycle));
 });
 app.MapPut("/api/sales/{id:int}", async (int id, SaleRequest request, HttpContext ctx, AppDbContext db, AccountingService acc) =>
 {
-    var sale = await db.Sales.Include(s => s.Extras).FirstOrDefaultAsync(s => s.Id == id);
+    var sale = await db.Sales.Include(s => s.Extras).Include(s => s.Installments).FirstOrDefaultAsync(s => s.Id == id);
     if (sale is null) return Results.NotFound("Satış kaydı bulunamadı.");
     if (sale.IsCancelled || sale.Status == "Cancelled") return Results.Conflict("İptal edilmiş satış düzenlenemez.");
     var previousTotal = sale.TotalPrice;
@@ -541,6 +623,22 @@ app.MapPut("/api/sales/{id:int}", async (int id, SaleRequest request, HttpContex
         if (customer is null) { customer = new Customer { FullName = request.CustomerName.Trim(), Phone = phone }; db.Customers.Add(customer); await db.SaveChangesAsync(); }
     }
     var totals = ComputeSaleTotals(request);
+    var newUnpaid = status == "Reserved" ? 0 : decimal.Round(Math.Max(0m, totals.Total - totals.Paid), 2);
+    var installmentCount = Math.Clamp(request.InstallmentCount ?? sale.InstallmentCount, 0, 36);
+    if (newUnpaid > 0 && installmentCount == 0) installmentCount = 1;
+    var firstDueDate = request.DueDate?.ToUniversalTime() ?? sale.DueDate ?? sale.SaleDate.AddDays(30);
+    if (newUnpaid > 0 && customer!.CreditLimit > 0)
+    {
+        await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM \"Customers\" WHERE \"Id\" = {customer.Id} FOR UPDATE");
+        var otherOpen = await db.Sales.AsNoTracking()
+            .Where(s => s.CustomerId == customer.Id && s.Id != sale.Id && !s.IsCancelled)
+            .SumAsync(s => (decimal?)(s.Quantity * s.UnitPrice + s.ExtrasTotal - s.PaidAmount)) ?? 0m;
+        var serviceOpen = await db.ServiceOrders.AsNoTracking()
+            .Where(o => o.CustomerId == customer.Id && o.Status == "Invoiced")
+            .SumAsync(o => (decimal?)(o.Total - o.PaidAmount)) ?? 0m;
+        if (otherOpen + serviceOpen + newUnpaid > customer.CreditLimit)
+            return Results.BadRequest(new { code = "credit_limit", message = $"Müşteri kredi limiti aşıldı. Diğer açık bakiye {otherOpen + serviceOpen:N2} TL, bu satış {newUnpaid:N2} TL, limit {customer.CreditLimit:N2} TL." });
+    }
     sale.MotorcycleId = motorcycle.Id;
     sale.Quantity = request.Quantity;
     sale.UnitPrice = decimal.Round(request.UnitPrice, 2);
@@ -558,7 +656,12 @@ app.MapPut("/api/sales/{id:int}", async (int id, SaleRequest request, HttpContex
     sale.CardInstallments = totals.Installments;
     sale.ExtrasTotal = totals.ExtrasTotal;
     sale.PaidAmount = status == "Reserved" ? 0 : totals.Paid;
+    sale.DueDate = newUnpaid > 0 ? firstDueDate : null;
+    sale.InstallmentCount = newUnpaid > 0 ? installmentCount : 0;
     if (status != "Reserved" && string.IsNullOrWhiteSpace(sale.InvoiceNo)) sale.InvoiceNo = $"SF-{sale.Id:D6}";
+    db.SaleInstallments.RemoveRange(sale.Installments);
+    sale.Installments.Clear();
+    if (newUnpaid > 0) AddSaleInstallments(db, sale, newUnpaid, firstDueDate, installmentCount);
     var oldExtras = sale.Extras.ToList();
     db.SaleExtras.RemoveRange(oldExtras);
     sale.Extras.Clear();
@@ -597,8 +700,10 @@ app.MapPost("/api/sales/{id:int}/complete", async (int id, HttpContext ctx, AppD
     sale.Status = "Delivered";
     sale.InvoiceNo = $"SF-{sale.Id:D6}";
     var plannedPaid = sale.CashAmount + sale.CardAmount;
-    sale.PaidAmount = plannedPaid > 0 ? Math.Clamp(plannedPaid, 0, sale.TotalPrice) : sale.PaymentMethod == "Credit" ? sale.PaidAmount : sale.TotalPrice;
-    db.StockMovements.Add(new StockMovement { MotorcycleId = sale.MotorcycleId, MovementType = "SaleOut", Quantity = sale.Quantity, UnitCost = sale.UnitCostAtSale, SaleId = sale.Id, DealerId = sale.DealerId, Note = $"Rezervasyon fatura #{sale.Id}" });
+            sale.PaidAmount = plannedPaid > 0 ? Math.Clamp(plannedPaid, 0, sale.TotalPrice) : sale.PaymentMethod == "Credit" ? sale.PaidAmount : sale.TotalPrice;
+        if (sale.TotalPrice - sale.PaidAmount > 0 && !await db.SaleInstallments.AnyAsync(x => x.SaleId == sale.Id))
+            AddSaleInstallments(db, sale, sale.TotalPrice - sale.PaidAmount, sale.DueDate ?? DateTime.UtcNow.AddDays(30), Math.Max(1, sale.InstallmentCount));
+        db.StockMovements.Add(new StockMovement { MotorcycleId = sale.MotorcycleId, MovementType = "SaleOut", Quantity = sale.Quantity, UnitCost = sale.UnitCostAtSale, SaleId = sale.Id, DealerId = sale.DealerId, Note = $"Rezervasyon fatura #{sale.Id}" });
     await db.SaveChangesAsync();
     await acc.PostSaleAsync(sale, dealer?.CommissionPercent ?? 0);
     CreateSalePayments(db, sale);
@@ -730,6 +835,8 @@ static string? ValidateSaleRequest(SaleRequest request)
         return "Ödeme tutarları negatif olamaz.";
     if (request.CardInstallments is < 0 or > 36)
         return "Taksit sayısı 0 ile 36 arasında olmalıdır.";
+    if (request.InstallmentCount is < 0 or > 36)
+        return "Vade taksit sayısı 0 ile 36 arasında olmalıdır.";
     var extrasError = ValidateSaleExtras(request.Extras);
     if (extrasError is not null) return extrasError;
     var totals = ComputeSaleTotals(request);
@@ -778,6 +885,30 @@ static (decimal ExtrasTotal, decimal Total, decimal Cash, decimal Card, int Inst
         : "Cash";
     return (extrasTotal, total, cash, card, installments, paid, method);
 }
+static string? ReadIdempotencyKey(HttpContext ctx)
+{
+    var value = ctx.Request.Headers["Idempotency-Key"].ToString().Trim();
+    return value.Length > 0 ? value : null;
+}
+static void AddSaleInstallments(AppDbContext db, Sale sale, decimal amount, DateTime firstDue, int count)
+{
+    count = Math.Clamp(count, 1, 36);
+    var total = decimal.Round(amount, 2);
+    var baseAmount = decimal.Round(total / count, 2);
+    var allocated = 0m;
+    for (var i = 1; i <= count; i++)
+    {
+        var value = i == count ? total - allocated : baseAmount;
+        allocated += value;
+        sale.Installments.Add(new SaleInstallment
+        {
+            SaleId = sale.Id,
+            Sequence = i,
+            DueDate = firstDue.AddMonths(i - 1),
+            Amount = value,
+        });
+    }
+}
 static void CreateSalePayments(AppDbContext db, Sale sale)
 {
     if (sale.PaidAmount <= 0) return;
@@ -811,6 +942,9 @@ static object SalePayload(Sale sale, Motorcycle? motorcycle = null) => new
     sale.ExtrasTotal,
     sale.InvoiceNo,
     sale.DealerId,
+    sale.DueDate,
+    sale.InstallmentCount,
+    Installments = sale.Installments.OrderBy(x => x.Sequence).Select(x => new { x.Id, x.Sequence, x.DueDate, x.Amount }),
     Extras = sale.Extras.Select(e => new { e.Id, e.Kind, e.Description, e.Quantity, e.UnitPrice, e.UnitCost, Total = e.Quantity * e.UnitPrice, TotalCost = e.Quantity * e.UnitCost }),
 };
 static bool IsStaffAllowed(PathString path, string method)
@@ -834,6 +968,12 @@ static bool IsStaffAllowed(PathString path, string method)
     if (route == "/api/dealers" || route == "/api/inventory" || route == "/api/accounts" || route == "/api/payments") return verb == "GET" || (route == "/api/payments" && verb == "POST");
     if (route == "/api/stock-transfers") return verb is "GET" or "POST";
     if (System.Text.RegularExpressions.Regex.IsMatch(route, @"^/api/stock-transfers/\d+/(ship|receive)$")) return verb == "POST";
+    if (route == "/api/parts" || System.Text.RegularExpressions.Regex.IsMatch(route, @"^/api/parts/\d+$")) return verb is "GET" or "PUT";
+    if (System.Text.RegularExpressions.Regex.IsMatch(route, @"^/api/parts/\d+/stock$")) return verb == "POST";
+    if (route == "/api/part-stock-movements") return verb == "GET";
+    if (route == "/api/service-orders" || System.Text.RegularExpressions.Regex.IsMatch(route, @"^/api/service-orders/\d+$")) return verb is "GET" or "POST" or "PUT";
+    if (System.Text.RegularExpressions.Regex.IsMatch(route, @"^/api/service-orders/\d+/(start|ready|cancel|invoice)$")) return verb == "POST";
+    if (route == "/api/reports/receivables-aging" || System.Text.RegularExpressions.Regex.IsMatch(route, @"^/api/customers/\d+/account$")) return verb == "GET";
     return false;
 }
 static string? Clean(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
@@ -875,15 +1015,15 @@ static bool VerifyPassword(string password, string encoded)
     try { var parts = encoded.Split('.'); if (parts.Length != 2) return false; var salt = Convert.FromBase64String(parts[0]); var expected = Convert.FromBase64String(parts[1]); var actual = Rfc2898DeriveBytes.Pbkdf2(password, salt, 210000, HashAlgorithmName.SHA256, expected.Length); return CryptographicOperations.FixedTimeEquals(actual, expected); }
     catch { return false; }
 }
-static string CreateToken(string username, string role, int tenantId, string secret)
+static string CreateToken(AppUser user, int tenantId, string secret)
 {
-    var payload = JsonSerializer.SerializeToUtf8Bytes(new { sub = username, role, tid = tenantId, exp = DateTimeOffset.UtcNow.AddHours(8).ToUnixTimeSeconds() });
+    var payload = JsonSerializer.SerializeToUtf8Bytes(new { sub = user.Username, role = user.Role, tid = tenantId, ver = user.TokenVersion, exp = DateTimeOffset.UtcNow.AddHours(8).ToUnixTimeSeconds() });
     var body = Base64Url(payload); using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret)); return $"{body}.{Base64Url(hmac.ComputeHash(Encoding.UTF8.GetBytes(body)))}";
 }
-static bool TryReadToken(string token, string secret, out string username, out string role, out int tenantId)
+static bool TryReadToken(string token, string secret, out string username, out string role, out int tenantId, out int tokenVersion)
 {
-    username = ""; role = ""; tenantId = 0;
-    try { var p = token.Split('.'); if (p.Length != 2) return false; using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret)); var expected = hmac.ComputeHash(Encoding.UTF8.GetBytes(p[0])); if (!CryptographicOperations.FixedTimeEquals(expected, FromBase64Url(p[1]))) return false; using var doc = JsonDocument.Parse(FromBase64Url(p[0])); var root = doc.RootElement; if (root.GetProperty("exp").GetInt64() < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return false; username = root.GetProperty("sub").GetString() ?? ""; role = root.GetProperty("role").GetString() ?? "Staff"; tenantId = root.GetProperty("tid").GetInt32(); return username.Length > 0 && tenantId > 0; }
+    username = ""; role = ""; tenantId = 0; tokenVersion = 0;
+    try { var p = token.Split('.'); if (p.Length != 2) return false; using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret)); var expected = hmac.ComputeHash(Encoding.UTF8.GetBytes(p[0])); if (!CryptographicOperations.FixedTimeEquals(expected, FromBase64Url(p[1]))) return false; using var doc = JsonDocument.Parse(FromBase64Url(p[0])); var root = doc.RootElement; if (root.GetProperty("exp").GetInt64() < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return false; username = root.GetProperty("sub").GetString() ?? ""; role = root.GetProperty("role").GetString() ?? "Staff"; tenantId = root.GetProperty("tid").GetInt32(); tokenVersion = root.TryGetProperty("ver", out var version) ? version.GetInt32() : 0; return username.Length > 0 && tenantId > 0; }
     catch { return false; }
 }
 static string Base64Url(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -898,10 +1038,10 @@ record CreateUserRequest(string Username, string Password, string Role, int? Dea
 record UserActiveRequest(bool IsActive);
 record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 record AdminPasswordRequest(string NewPassword);
-record CustomerRequest(string FullName, string? Phone, string? Email, string? Notes);
+record CustomerRequest(string FullName, string? Phone, string? Email, string? Notes, decimal CreditLimit = 0);
 record StockAdjustmentRequest(int MotorcycleId, string MovementType, int Quantity, decimal UnitCost, string? Note);
 record SaleExtraRequest(string Description, decimal UnitPrice, int Quantity = 1, string? Kind = "Product", decimal UnitCost = 0);
-record SaleRequest(int MotorcycleId, string CustomerName, string? CustomerPhone, int Quantity, decimal UnitPrice, int? CustomerId = null, int? DealerId = null, string? PaymentMethod = "Cash", decimal? PaidAmount = null, string? Channel = "Retail", string? Status = "Delivered", DateTime? SaleDate = null, decimal? CashAmount = null, decimal? CardAmount = null, int? CardInstallments = null, List<SaleExtraRequest>? Extras = null);
+record SaleRequest(int MotorcycleId, string CustomerName, string? CustomerPhone, int Quantity, decimal UnitPrice, int? CustomerId = null, int? DealerId = null, string? PaymentMethod = "Cash", decimal? PaidAmount = null, string? Channel = "Retail", string? Status = "Delivered", DateTime? SaleDate = null, decimal? CashAmount = null, decimal? CardAmount = null, int? CardInstallments = null, List<SaleExtraRequest>? Extras = null, DateTime? DueDate = null, int? InstallmentCount = null);
 record ExpenseRequest(string Category, string Description, decimal Amount, DateTime? ExpenseDate);
 
 // WebApplicationFactory tabanlı entegrasyon testlerinin giriş noktasını görmesi için.

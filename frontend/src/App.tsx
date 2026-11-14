@@ -13,6 +13,8 @@ import { BalancePage, DealersPage, LedgerPage, PaymentsPage, TransfersPage } fro
 import { CatalogManagement, OperationalModules, type ModuleKey } from "./OperationalModules";
 import TenantSettingsPage from "./TenantSettings";
 import { AuditPage, PasswordChangeCard } from "./Security";
+import { PartsPage, ServicePage } from "./Service";
+import ReceivablesPage from "./Finance";
 import PublicCatalog from "./PublicCatalog";
 import { useNow } from "./useNow";
 
@@ -56,7 +58,7 @@ const NAV: NavItem[] = [
   { id: "dealers", label: "Bayiler / Şubeler", icon: "building", title: "Bayi ve Şube Ağı", subtitle: "Şube kartları, komisyon ve performans.", roles: ALL, group: "ŞUBE YÖNETİMİ" },
   { id: "transfers", label: "Sevk / Depo", icon: "swap", title: "Stok Yönlendirme", subtitle: "Merkez ↔ şube konsinye ve toptan sevk.", roles: ALL, group: "ŞUBE YÖNETİMİ" },
 
-  { id: "service", label: "Servis", icon: "wrench", title: "Servis Yönetimi", subtitle: "Servis kabul, bakım ve iş emirleri.", roles: ALL, group: "OPERASYON" },
+  { id: "service", label: "Servis", icon: "wrench", title: "Servis Yönetimi", subtitle: "Servis kabul, bakım ve iş emirleri.", roles: ["Admin", "Staff"], group: "OPERASYON" },
   { id: "parts", label: "Yedek Parça", icon: "package", title: "Yedek Parça", subtitle: "Parça hareketleri ve stok kayıtları.", roles: ["Admin"], group: "OPERASYON" },
   { id: "purchasing", label: "Satın Alma", icon: "shopping-cart", title: "Satın Alma", subtitle: "Tedarikçi ve sipariş süreçleri.", roles: ["Admin"], group: "OPERASYON" },
 
@@ -489,13 +491,17 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   const onboardingDone = onboardingSteps.filter((step) => step.done).length;
 
   const toggleTheme = () => setThemeMode(resolvedTheme === "dark" ? "light" : "dark");
+  const logout = async () => {
+    try { await api("/auth/logout", { method: "POST" }); } catch { /* sunucu kapalıysa yerel token yine silinir */ }
+    finally { onLogout(); }
+  };
 
   const renderPage = () => {
     switch (current.id) {
       case "dashboard": return <Dashboard motorcycles={motorcycles} sales={sales} role={role} onNavigate={go} />;
       case "motorcycles": return <Motorcycles key={`m-${navSearch}`} motorcycles={motorcycles} loading={loading} role={role} reload={loadMotorcycles} initialSearch={navSearch} />;
       case "sales": return <Sales key={`s-${navSearch}`} motorcycles={motorcycles} sales={sales} customers={customers} dealers={dealers} role={role} loading={loading} reload={reloadAll} initialSearch={navSearch} />;
-      case "customers": return <CustomersPage key={`c-${navSearch}`} customers={customers} reload={loadCustomers} initialSearch={navSearch} />;
+      case "customers": return <CustomersPage key={`c-${navSearch}`} customers={customers} role={role} reload={loadCustomers} initialSearch={navSearch} />;
       case "stock": return <StockPage motorcycles={motorcycles} role={role} reloadMotorcycles={loadMotorcycles} />;
       case "dealers": return <DealersPage role={role} />;
       case "transfers": return <TransfersPage motorcycles={motorcycles} role={role} />;
@@ -508,8 +514,11 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       case "tenant": return <TenantSettingsPage />;
       case "audit": return <AuditPage />;
       case "catalog": return <CatalogManagement motorcycles={motorcycles} />;
-      case "calendar": case "service": case "parts": case "purchasing": case "tradein": case "crm": case "finance": case "automation":
+      case "calendar": case "purchasing": case "tradein": case "crm": case "automation":
         return <OperationalModules module={current.id as ModuleKey} role={role} />;
+      case "finance": return <ReceivablesPage key="finance" />;
+      case "service": return <ServicePage key="service" role={role} />;
+      case "parts": return <PartsPage key="parts" role={role} />;
       default: return null;
     }
   };
@@ -537,7 +546,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         <div className="sidebar-footer">
           <div className="user-avatar">{(username || "U").slice(0, 1).toUpperCase()}</div>
           <div className="user-meta"><strong>{username || "Kullanıcı"}</strong><small>{ROLE_LABEL[role]} · {tenantName || tenantSlug || "İşletme"}</small></div>
-          <button type="button" className="icon-btn" title="Çıkış yap" aria-label="Çıkış yap" onClick={onLogout}><Icon name="logout" /></button>
+          <button type="button" className="icon-btn" title="Çıkış yap" aria-label="Çıkış yap" onClick={() => void logout()}><Icon name="logout" /></button>
         </div>
       </aside>
       {menuOpen && <div className="sidebar-scrim" onClick={() => setMenuOpen(false)} />}
@@ -616,7 +625,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
                     <li><a href={`/catalog?tenant=${encodeURIComponent(tenantSlug)}`} target="_blank" rel="noreferrer" onClick={() => setUserOpen(false)}><Icon name="external" /> Müşteri kataloğu</a></li>
                   </ul>
                   <div className="menu-foot">
-                    <button type="button" className="btn btn-ghost btn-block btn-sm" onClick={onLogout}><Icon name="logout" size={15} /> Çıkış yap</button>
+                    <button type="button" className="btn btn-ghost btn-block btn-sm" onClick={() => void logout()}><Icon name="logout" size={15} /> Çıkış yap</button>
                   </div>
                 </div>
               )}

@@ -59,6 +59,17 @@ public class Sale : ITenantEntity
     public decimal PaidAmount { get; set; }
 
     public string? InvoiceNo { get; set; }
+
+    /// <summary>Vadeli satışta ilk taksitin vadesi.</summary>
+    public DateTime? DueDate { get; set; }
+
+    /// <summary>Vadeli satışta taksit sayısı (0 = tek vadeli bakiye).</summary>
+    public int InstallmentCount { get; set; }
+
+    /// <summary>İstemci retry'larında aynı satışın iki kez oluşmasını önler.</summary>
+    public string? IdempotencyKey { get; set; }
+
+    public List<SaleInstallment> Installments { get; set; } = [];
 }
 
 /// <summary>Satışla birlikte verilen aksesuar, yükseltme veya hizmet kalemi.</summary>

@@ -49,6 +49,54 @@ export type Sale = {
   cardInstallments?: number;
   paidAmount?: number;
   invoiceNo?: string | null;
+  dueDate?: string | null;
+  installmentCount?: number;
+  installments?: { id: number; sequence: number; dueDate: string; amount: number }[];
+};
+
+export type Part = {
+  id: number;
+  code: string;
+  name: string;
+  stockQuantity: number;
+  purchaseCost: number;
+  salePrice: number;
+  isActive: boolean;
+};
+
+export type ServiceOrderItem = {
+  id?: number;
+  kind: string;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  unitCost: number;
+  partId?: number | null;
+  total?: number;
+};
+
+export type ServiceOrder = {
+  id: number;
+  orderNo: string;
+  status: string;
+  complaint?: string | null;
+  diagnosis?: string | null;
+  notes?: string | null;
+  openedAt: string;
+  dueDate?: string | null;
+  invoicedAt?: string | null;
+  invoiceNo?: string | null;
+  totalLabor: number;
+  totalParts: number;
+  total: number;
+  paidAmount: number;
+  paymentMethod: string;
+  customerId?: number | null;
+  customer?: string | null;
+  motorcycleId?: number | null;
+  motorcycle?: string | null;
+  items: ServiceOrderItem[];
+  outstanding: number;
 };
 
 export type Dealer = {
@@ -90,6 +138,7 @@ export type Payment = {
   method: string;
   amount: number;
   saleId?: number | null;
+  serviceOrderId?: number | null;
   dealerId?: number | null;
   customerId?: number | null;
   counterparty?: string | null;
@@ -102,6 +151,7 @@ export type Customer = {
   phone?: string | null;
   email?: string | null;
   notes?: string | null;
+  creditLimit: number;
 };
 
 export async function api(path: string, init: RequestInit = {}) {
