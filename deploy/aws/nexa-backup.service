@@ -1,0 +1,10 @@
+[Unit]
+Description=NEXA PostgreSQL backup
+Documentation=file:/opt/nexa/README-AWS.md
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nexa-backup
+Nice=10
+IOSchedulingClass=best-effort

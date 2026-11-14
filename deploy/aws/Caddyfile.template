@@ -1,0 +1,21 @@
+__NEXA_HOST__ {
+    encode zstd gzip
+    root * /var/www/nexa
+
+    @api path /api/*
+    handle @api {
+        reverse_proxy 127.0.0.1:5000
+    }
+
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        Strict-Transport-Security "max-age=31536000"
+    }
+}

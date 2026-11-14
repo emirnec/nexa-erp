@@ -1,0 +1,52 @@
+name: Build and test
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend install and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: API build
+        run: dotnet build src/MotorcycleSales.Api/MotorcycleSales.Api.csproj -c Release --nologo
+
+      - name: Integration tests
+        env:
+          NEXA_TEST_ADMIN_CONNECTION: Host=127.0.0.1;Port=5432;Username=postgres;Password=postgres;Database=postgres
+        run: dotnet test tests/MotorcycleSales.Api.Tests/MotorcycleSales.Api.Tests.csproj -c Release --nologo

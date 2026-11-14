@@ -1,0 +1,24 @@
+[Unit]
+Description=NEXA ERP API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexa
+Group=nexa
+WorkingDirectory=/opt/nexa/api
+EnvironmentFile=/etc/nexa/nexa.env
+ExecStart=/opt/nexa/api/MotorcycleSales.Api
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/nexa/api
+
+[Install]
+WantedBy=multi-user.target
